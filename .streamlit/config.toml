@@ -1,0 +1,17 @@
+[server]
+enableStaticServing = true   # sert le dossier static/ (icônes et manifeste PWA)
+maxUploadSize = 10           # Mo
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#19c37d"
+backgroundColor = "#0a0e13"
+secondaryBackgroundColor = "#10171f"
+textColor = "#e8eef5"
+font = "sans serif"
