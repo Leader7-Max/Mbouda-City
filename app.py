@@ -1,690 +1,114 @@
-"""
-Mbouda City : messagerie sans numéro de téléphone, en Streamlit.
-Lancer : streamlit run app.py
-
-app.py est organisé en 6 parties :
-  1/6  Configuration, thème et utilitaires
-  2/6  Connexion / création de compte
-  3/6  Barre latérale : menu, liste des discussions, nouvelles discussions
-  4/6  Affichage des messages
-  5/6  Écran de discussion : envoi, vocaux, stickers, réactions, appels
-  6/6  Stories, profil, PWA et routeur principal
-"""
-# ============================================================================
-# PARTIE 1/6 : Configuration, thème et utilitaires
-# ============================================================================
-import base64
-import inspect
-import os
-import secrets
-import time
-from urllib.parse import quote
-
-import streamlit as st
-import streamlit.components.v1 as components
-
-import db
-import helpers as H
-
-ROOT = os.path.dirname(os.path.abspath(__file__))
-_ICON = os.path.join(ROOT, "static", "icon-192.png")
-st.set_page_config(page_title="Mbouda City", page_icon=_ICON if os.path.exists(_ICON) else "💬",
-                   layout="centered", initial_sidebar_state="auto")
-
-CALL_BASE = (db.secret("CALL_BASE_URL") or "https://meet.jit.si").rstrip("/")
-
-
-def _params(fn):
-    try:
-        return inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return {}
-
-
-# Fonctions selon la version de Streamlit : la barre d'envoi reçoit fichiers et micro quand c'est possible.
-HAS_FILE_INPUT = "accept_file" in _params(st.chat_input)
-HAS_AUDIO_INPUT = "accept_audio" in _params(st.chat_input)
-HAS_KEY = "key" in _params(st.container)
-
-# Composant invisible (dossier frontend/) : gestes, menu, visionneuse, barre fixe. Renvoie les actions à Python.
-bridge = components.declare_component("mc_bridge", path=os.path.join(ROOT, "frontend"))
-
-
-def sw(fn):
-    """Largeur pleine, compatible avec toutes les versions de Streamlit."""
-    p = inspect.signature(fn).parameters
-    if "width" in p:
-        return {"width": "stretch"}
-    return {"use_container_width": True} if "use_container_width" in p else {}
-
-
-@st.cache_resource
-def _css():
-    with open(os.path.join(ROOT, "assets", "style.css"), encoding="utf-8") as f:
-        return f.read()
-
-
-st.markdown(f"<style>{_css()}</style>", unsafe_allow_html=True)
-
-
-@st.cache_data(show_spinner=False, max_entries=300)
-def media_uri(mid):
-    m = db.get_media(mid)
-    return f"data:{m[1]};base64,{base64.b64encode(m[0]).decode()}" if m else ""
-
-
-@st.cache_data(show_spinner=False, max_entries=24, ttl=600)
-def media_blob(mid):
-    return db.get_media(mid)
-
-
-def browser_tz():
-    try:
-        return H.tzinfo(st.context.timezone)
-    except Exception:
-        return H.tzinfo(None)
-
-
-def avatar(user, size=40, ring=False):
-    uri = media_uri(user["avatar_id"]) if user and user.get("avatar_id") else ""
-    return H.avatar_html(user, size, uri, ring)
-
-
-def html(s):
-    st.markdown(s, unsafe_allow_html=True)
-
-
-def run_js(js):
-    components.html(f"<script>{js}</script>", height=0)
-
-
-def chat_title(chat, me, umap):
-    if chat["kind"] == "group":
-        return chat["name"]
-    other = next((u for u in chat["members"] if u != me), me)
-    return (umap.get(other) or {}).get("name", other)
-
-
-# ============================================================================
-# PARTIE 2/6 : Connexion / création de compte
-# ============================================================================
-def current_user():
-    if st.session_state.get("user"):
-        return st.session_state.user
-    tok = st.query_params.get("s")
-    if tok:
-        u = db.user_from_token(tok)
-        if u:
-            st.session_state.update(user=u, token=tok, view="chats", chat=None)
-            return u
-        st.query_params.clear()
-    return None
-
-
-def start_session(user):
-    tok = db.new_session(user)
-    st.query_params["s"] = tok
-    st.session_state.update(user=user, token=tok, view="chats", chat=None)
-    db.purge_stories()
-    st.rerun()
-
-
-def logout():
-    db.end_session(st.session_state.get("token", ""))
-    st.query_params.clear()
-    st.session_state.clear()
-    st.rerun()
-
-
-def auth_screen():
-    html('<div class="mc-hero"><div class="mc-logo">M</div><h1>Mbouda City</h1>'
-         '<p>Discutez, appelez, partagez. Sans numéro de téléphone.</p></div>')
-    t_login, t_new = st.tabs(["Connexion", "Créer un compte"])
-    with t_login:
-        with st.form("f_login"):
-            u = st.text_input("Nom d’utilisateur", placeholder="jean.237")
-            p = st.text_input("Mot de passe", type="password")
-            ok = st.form_submit_button("Se connecter", type="primary", **sw(st.form_submit_button))
-        if ok:
-            user, err = db.login(u, p)
-            st.error(err) if err else start_session(user)
-    with t_new:
-        with st.form("f_new"):
-            n = st.text_input("Nom affiché", placeholder="Jean")
-            u = st.text_input("Nom d’utilisateur", placeholder="jean.237", help="C’est ce que vos amis utiliseront pour vous trouver.")
-            p = st.text_input("Mot de passe (6 caractères minimum)", type="password")
-            ok = st.form_submit_button("Créer mon compte", type="primary", **sw(st.form_submit_button))
-        if ok:
-            user, err = db.register(u, p, n)
-            st.error(err) if err else start_session(user)
-
-
-# ============================================================================
-# PARTIE 3/6 : Barre latérale
-# ============================================================================
-def open_chat(chat_id):
-    st.session_state.update(view="chats", chat=chat_id, close_sb=True)
-    st.rerun()
-
-
-@st.dialog("Nouvelle discussion")
-def new_chat_dialog():
-    me = st.session_state.user
-    q = st.text_input("Rechercher un @utilisateur", placeholder="jean.237", key="nc_q")
-    if len(db.clean_username(q)) >= 2:
-        res = db.search_users(q, me)
-        if not res:
-            st.caption("Aucun utilisateur trouvé.")
-        for r in res:
-            if st.button(f'{r["name"]}  ·  @{r["username"]}', key=f'nc_{r["username"]}', **sw(st.button)):
-                open_chat(db.dm_with(me, r["username"]))
-
-
-@st.dialog("Nouveau groupe")
-def new_group_dialog():
-    me = st.session_state.user
-    name = st.text_input("Nom du groupe", max_chars=40)
-    contacts = db.contacts_of(me)
-    pick = st.multiselect("Membres", options=list(contacts), format_func=lambda u: f'{contacts[u]["name"]} (@{u})')
-    extra = st.text_input("Ou ajoutez des @utilisateurs", placeholder="ana, ben.237")
-    if st.button("Créer le groupe", type="primary", **sw(st.button)):
-        cid, err = db.create_group(me, name, list(pick) + extra.split(","))
-        st.error(err) if err else open_chat(cid)
-
-
-def call_url(room, video, display_name):
-    p = ["config.prejoinPageEnabled=false", "userInfo.displayName=" + quote(f'"{display_name}"')]
-    if not video:
-        p.append("config.startAudioOnly=true")
-    return f"{CALL_BASE}/{room}#" + "&".join(p)
-
-
-@st.fragment(run_every=4)
-def chat_list(me):
-    db.touch(me)
-    chats = db.my_chats(me)
-    umap = db.users_map({u for c in chats for u in c["members"]})
-    my_name = (umap.get(me) or {}).get("name", me)
-    now = time.time()
-    for c in chats:  # appel entrant : dernier message = appel récent d'un autre membre
-        m = c["last"]
-        if m and m["kind"] == "call" and m["sender"] != me and now - m["ts"] < 90:
-            st.success(f'📞 {chat_title(c, me, umap)} vous appelle')
-            st.link_button("Rejoindre l’appel", call_url(m["body"], m["meta"] == "video", my_name), **sw(st.link_button))
-    if not chats:
-        st.caption("Aucune discussion. Touchez « ＋ Discussion » pour commencer.")
-    for c in chats:
-        label = chat_title(c, me, umap)
-        if c["unread"]:
-            label += f'  🟢 {c["unread"]}'
-        if c["last"]:
-            label += "  —  " + H.preview_text(c["last"], me)[:28]
-        active = st.session_state.get("chat") == c["id"] and st.session_state.get("view") == "chats"
-        if st.button(label, key=f'chat_{c["id"]}', type="primary" if active else "secondary", **sw(st.button)):
-            open_chat(c["id"])
-
-
-def sidebar(me):
-    u = db.get_user(me)
-    with st.sidebar:
-        html('<div class="mc-brand">Mbouda City</div>')
-        html(f'<div class="mc-me">{avatar(u, 44)}<div><b>{H.esc(u["name"])}</b><br><small>@{H.esc(me)}</small></div></div>')
-        view = st.session_state.get("view", "chats")
-        for key, label in (("chats", "💬 Discussions"), ("stories", "◎ Stories"), ("profile", "👤 Mon profil")):
-            if st.button(label, key=f"nav_{key}", type="primary" if view == key else "secondary", **sw(st.button)):
-                st.session_state.update(view=key, close_sb=key != "chats")
-                st.rerun()
-        if st.button("＋ Discussion", key="b_new", **sw(st.button)):
-            new_chat_dialog()
-        if st.button("＋ Groupe", key="b_grp", **sw(st.button)):
-            new_group_dialog()
-        st.divider()
-        chat_list(me)
-
-
-# ============================================================================
-# PARTIE 4/6 : Affichage des messages
-# ============================================================================
-def render_widget(w, my_name):
-    """Composants natifs sous la bulle : vocal, fichier, appel."""
-    if w["type"] == "voice":
-        blob = media_blob(w["media_id"])
-        if blob:
-            st.audio(blob[0], format=blob[1] or "audio/wav")
-    elif w["type"] == "video":
-        blob = media_blob(w["media_id"])
-        if blob:
-            st.video(blob[0], format=blob[1] or "video/mp4")
-    elif w["type"] == "file":
-        blob = media_blob(w["media_id"])
-        if blob:
-            kw = dict(label=f'⬇ Télécharger {w["name"]}', data=blob[0], file_name=w["name"],
-                      mime=blob[1] or "application/octet-stream", key=f'dl_{w["id"]}', **sw(st.download_button))
-            try:
-                st.download_button(on_click="ignore", **kw)
-            except Exception:
-                st.download_button(**kw)
-    elif w["type"] == "call":
-        if time.time() - w["ts"] < 1800:
-            st.link_button("Rejoindre l’appel", call_url(w["room"], w["video"], my_name), **sw(st.link_button))
-        else:
-            st.caption("Appel terminé")
-
-
-def render_messages(msgs, me, chat, umap, reacts):
-    tz = browser_tz()
-    others = [u for u in chat["members"] if u != me]
-    name_of = lambda u: (umap.get(u) or {}).get("name", u)
-    my_name = name_of(me)
-    originals = db.messages_by_ids([m.get("reply_to") for m in msgs], chat["id"])
-    quotes = {i: H.quote_info(o, name_of) for i, o in originals.items()}
-    buf, last_day = [], None
-
-    def flush():
-        if buf:
-            html("".join(buf))
-            buf.clear()
-
-    for m in msgs:
-        day = H.fmt_day(m["ts"], tz)
-        if day != last_day:
-            buf.append(f'<div class="mc-day"><span>{day}</span></div>')
-            last_day = day
-        bub, widget = H.bubble(m, me, chat["kind"] == "group", name_of, chat["reads"], others,
-                               reacts.get(m["id"], {}), media_uri, tz, quotes)
-        buf.append(bub)
-        if widget:
-            flush()
-            render_widget(widget, my_name)
-    flush()
-
-
-def bump_limit(chat_id):
-    st.session_state[f"lim_{chat_id}"] = st.session_state.get(f"lim_{chat_id}", 50) + 50
-
-
-# ============================================================================
-# PARTIE 5/6 : Écran de discussion
-# ============================================================================
-SCROLL_JS = """(function(){ /*__ID__*/
-  const go=()=>{const p=window.parent,d=p.document;
-    const m=d.querySelector('[data-testid="stMain"]')||d.querySelector('section.main');
-    if(m) m.scrollTo({top:m.scrollHeight,behavior:'smooth'}); p.scrollTo(0,d.body.scrollHeight);};
-  setTimeout(go,150); setTimeout(go,700);})();"""
-
-
-@st.fragment(run_every=3)
-def messages_fragment(me, chat_id):
-    """Rafraîchi toutes les 3 s : en-tête, messages, accusés de lecture, réactions."""
-    db.touch(me)
-    db.mark_read(chat_id, me)
-    chat = db.chat_info(chat_id, me)
-    if not chat:
-        return
-    limit = st.session_state.get(f"lim_{chat_id}", 50)
-    msgs = db.chat_messages(chat_id, limit)
-    umap = db.users_map(chat["members"])
-    reacts = db.reactions_for([m["id"] for m in msgs])
-
-    title = H.esc(chat_title(chat, me, umap))
-    if chat["kind"] == "dm":
-        other = umap.get(next((u for u in chat["members"] if u != me), me)) or {}
-        online = time.time() - (other.get("last_seen") or 0) < 12
-        sub = '<span class="mc-on">● en ligne</span>' if online else f'@{H.esc(other.get("username", ""))}'
-        head_user = other
-    else:
-        sub = H.esc(", ".join((umap.get(u) or {}).get("name", u) for u in chat["members"]))
-        head_user = {"name": chat["name"]}
-    html(f'<div class="mc-head">{avatar(head_user, 46)}<div><b>{title}</b><br><small>{sub}</small></div></div>')
-
-    if len(msgs) >= limit:
-        st.button("↑ Messages précédents", key=f"more_{chat_id}", on_click=bump_limit, args=(chat_id,))
-    if msgs:
-        render_messages(msgs, me, chat, umap, reacts)
-    else:
-        st.caption("Aucun message. Dites bonjour 👋")
-
-    call = st.session_state.get("my_call")
-    if call and call["chat"] == chat_id and time.time() - call["ts"] < 1800:
-        st.info("Appel lancé. Ouvrez-le pour rejoindre la salle ; l’autre personne reçoit l’invitation.")
-        st.link_button("Rejoindre mon appel", call["url"], **sw(st.link_button))
-
-    last_id = msgs[-1]["id"] if msgs else 0
-    if st.session_state.get(f"seen_{chat_id}") != last_id:
-        st.session_state[f"seen_{chat_id}"] = last_id
-        run_js(SCROLL_JS.replace("__ID__", str(last_id)))
-
-
-def send_upload(me, chat_id, f, reply_to=None):
-    """Photo, vidéo ou document. Retourne True si envoyé."""
-    data, name, mime = f.getvalue(), f.name, f.type or "application/octet-stream"
-    limit = H.MAX_VIDEO if mime.startswith("video/") else H.MAX_FILE
-    if len(data) > limit:
-        st.error(f"« {name} » est trop lourd ({H.fmt_size(len(data))}). Maximum : {H.fmt_size(limit)}.")
-        return False
-    if mime.startswith("image/"):
-        try:
-            data, mime = H.shrink(data), "image/jpeg"
-            db.send(chat_id, me, "image", "", db.save_media(data, mime, name), name, reply_to)
-            return True
-        except Exception:
-            data = f.getvalue()  # image illisible : envoyée comme fichier
-            mime = f.type or "application/octet-stream"
-    kind = "video" if mime.startswith("video/") else "file"
-    db.send(chat_id, me, kind, "", db.save_media(data, mime, name), name, reply_to)
-    return True
-
-
-def send_voice(me, chat_id, data, reply_to=None):
-    if len(data) > H.MAX_VOICE:
-        st.error("Vocal trop long.")
-        return False
-    mid = db.save_media(data, "audio/wav", "vocal.wav")
-    db.send(chat_id, me, "voice", "", mid, str(round(H.wav_duration(data))), reply_to)
-    return True
-
-
-def cb_sticker(key, kind, me, chat_id):
-    v = st.session_state.get(key)
-    if not v:
-        return
-    body = "e:" + v if kind == "e" else f"t:{H.STICKER_WORDS.index(v) % len(H.BGS)}:{v}"
-    db.send(chat_id, me, "sticker", body)
-    st.session_state[key] = None
-
-
-def cb_react(me):
-    v, mid = st.session_state.get("react_pick"), st.session_state.get("react_msg")
-    if v and mid:
-        db.toggle_reaction(mid, me, v)
-    st.session_state["react_pick"] = None
-
-
-def start_call(me, chat, video):
-    room = f"MboudaCity-{chat['id']}-{secrets.token_hex(4)}"
-    db.send(chat["id"], me, "call", room, meta="video" if video else "audio")
-    name = (db.get_user(me) or {}).get("name", me)
-    st.session_state.my_call = {"chat": chat["id"], "ts": time.time(), "url": call_url(room, video, name)}
-
-
-@st.dialog("Transférer le message")
-def forward_dialog(mid):
-    me = st.session_state.user
-    m = db.get_message(mid)
-    if not m or not db.is_member(m["chat_id"], me):
-        st.error("Message introuvable.")
-        return
-    chats = db.my_chats(me)
-    umap = db.users_map({u for c in chats for u in c["members"]})
-    titles = {c["id"]: chat_title(c, me, umap) for c in chats}
-    html(f'<div class="mc-replybar"><div>{H.esc(H.preview_text(m, ""))}</div></div>')
-    dest = st.multiselect("Envoyer à", list(titles), format_func=lambda i: titles[i])
-    if st.button("Transférer", type="primary", **sw(st.button)):
-        if not dest:
-            st.warning("Choisissez au moins une discussion.")
-        else:
-            n = db.forward(mid, me, dest)
-            st.session_state.toast = f"Message transféré à {n} discussion{'s' if n > 1 else ''}"
-            st.rerun()
-
-
-def handle_event(me, chat, ev):
-    """Actions envoyées par le composant JS : répondre, transférer, réagir."""
-    if not isinstance(ev, dict) or not ev.get("n") or ev["n"] == st.session_state.get("last_ev"):
-        return
-    st.session_state.last_ev = ev["n"]
-    try:
-        mid = int(ev.get("id"))
-    except (TypeError, ValueError):
-        return
-    m = db.get_message(mid)
-    if not m or m["chat_id"] != chat["id"]:
-        return
-    kind = ev.get("type")
-    if kind == "reply":
-        st.session_state.reply = {"chat": chat["id"], "mid": mid}
-    elif kind == "react":
-        idx = ev.get("idx")
-        if isinstance(idx, int) and 0 <= idx < len(H.REACTIONS):
-            db.toggle_reaction(mid, me, H.REACTIONS[idx])
-    elif kind == "forward" and m["kind"] != "call":
-        forward_dialog(mid)
-
-
-def unpack_input(v):
-    """Valeur de la barre d'envoi -> (texte, fichiers, audio). Compatible avec toutes les versions."""
-    if v is None:
-        return "", [], None
-    if isinstance(v, str):
-        return v, [], None
-    g = v.get if hasattr(v, "get") else (lambda k: getattr(v, k, None))
-    return (g("text") or ""), list(g("files") or []), g("audio")
-
-
-def handle_input(me, chat_id, value):
-    text, files, audio = unpack_input(value)
-    if not (text.strip() or files or audio):
-        return
-    r = st.session_state.pop("reply", None)
-    reply = r["mid"] if r and r["chat"] == chat_id else None
-    for f in files:
-        if send_upload(me, chat_id, f, reply):
-            reply = None
-    if audio is not None:
-        if send_voice(me, chat_id, audio.getvalue(), reply):
-            reply = None
-    if text.strip():
-        db.send(chat_id, me, "text", text.strip(), reply_to=reply)
-
-
-def tools_popover(me, chat):
-    chat_id = chat["id"]
-    k = st.session_state.setdefault("k", 0)  # change après chaque envoi pour vider les widgets
-    names = (["📎"] if not HAS_FILE_INPUT else []) + (["🎤"] if not HAS_AUDIO_INPUT else []) + ["😊", "😀", "📞"]
-    with st.popover("＋", **sw(st.popover)):
-        tabs = dict(zip(names, st.tabs(names)))
-        if "📎" in tabs:  # versions de Streamlit dont la barre d'envoi n'accepte pas les fichiers
-            with tabs["📎"]:
-                st.caption("Photo, vidéo, document")
-                f = st.file_uploader("Fichier", key=f"up_{k}", label_visibility="collapsed")
-                if f and st.button("Envoyer le fichier", key=f"upb_{k}", type="primary"):
-                    if send_upload(me, chat_id, f):
-                        st.session_state.k = k + 1
-                        st.rerun()
-        if "🎤" in tabs:  # idem pour le micro
-            with tabs["🎤"]:
-                st.caption("Appuyez sur le micro, parlez, puis envoyez.")
-                a = st.audio_input("Message vocal", key=f"au_{k}", label_visibility="collapsed")
-                if a and st.button("Envoyer le vocal", key=f"aub_{k}", type="primary"):
-                    if send_voice(me, chat_id, a.getvalue()):
-                        st.session_state.k = k + 1
-                        st.rerun()
-        with tabs["😊"]:
-            st.caption("Emojis géants")
-            st.pills("Emojis", H.STICKER_EMOJIS, key="stk_e", label_visibility="collapsed",
-                     on_change=cb_sticker, args=("stk_e", "e", me, chat_id))
-            st.caption("Mots")
-            st.pills("Mots", H.STICKER_WORDS, key="stk_w", label_visibility="collapsed",
-                     on_change=cb_sticker, args=("stk_w", "t", me, chat_id))
-        with tabs["😀"]:
-            recent = [m for m in db.chat_messages(chat_id, 15) if m["kind"] != "call"][::-1]
-            if not recent:
-                st.caption("Aucun message.")
-            else:
-                st.caption("Astuce : appui long sur un message pour réagir plus vite.")
-                umap = db.users_map(chat["members"])
-                label = lambda i: next(
-                    f'{(umap.get(m["sender"]) or {}).get("name", m["sender"])} : {H.preview_text(m, "")[:34]}'
-                    for m in recent if m["id"] == i)
-                st.selectbox("Message", [m["id"] for m in recent], format_func=label, key="react_msg")
-                st.pills("Réaction", H.REACTIONS, key="react_pick", on_change=cb_react, args=(me,))
-        with tabs["📞"]:
-            st.caption("L’appel s’ouvre dans un nouvel onglet (Jitsi). Les autres reçoivent l’invitation ici.")
-            c1 = st.button("📞 Appel audio", key="call_a", **sw(st.button))
-            c2 = st.button("🎥 Appel vidéo", key="call_v", **sw(st.button))
-            if c1 or c2:
-                start_call(me, chat, video=c2)
-                st.rerun()
-
-
-def tools_strip(me, chat):
-    """Barre fixe juste au-dessus de la barre d'envoi : réponse en cours + bouton ＋ (le CSS la fixe en bas)."""
-    box = st.container(key="mc-tools") if HAS_KEY else st.container()
-    with box:
-        r = st.session_state.get("reply")
-        if r and r["chat"] == chat["id"]:
-            o = db.get_message(r["mid"])
-            if o and o["chat_id"] == chat["id"]:
-                umap = db.users_map(chat["members"])
-                q = H.quote_info(o, lambda u: (umap.get(u) or {}).get("name", u))
-                html(f'<div class="mc-replybar"><b>↩ Réponse à {H.esc(q["name"])}</b><div>{H.esc(q["text"])}</div></div>')
-                if st.button("✕", key="reply_x"):
-                    st.session_state.pop("reply", None)
-                    st.rerun()
-        tools_popover(me, chat)
-
-
-def chat_view(me, chat_id, ev=None):
-    chat = db.chat_info(chat_id, me)
-    if not chat:
-        st.session_state.chat = None
-        st.rerun()
-    handle_event(me, chat, ev)
-    kw = {"max_chars": 4000}
-    if HAS_FILE_INPUT:
-        kw["accept_file"] = "multiple"  # trombone dans la barre d'envoi : photos, vidéos, documents
-    if HAS_AUDIO_INPUT:
-        kw["accept_audio"] = True       # micro dans la barre d'envoi
-    handle_input(me, chat_id, st.chat_input("Écrire un message", **kw))
-    messages_fragment(me, chat_id)
-    tools_strip(me, chat)
-
-
-# ============================================================================
-# PARTIE 6/6 : Stories, profil, PWA et routeur principal
-# ============================================================================
-def stories_view(me):
-    st.markdown("### Stories")
-    k = st.session_state.setdefault("ks", 0)
-    with st.popover("＋ Ajouter une story", **sw(st.popover)):
-        t_txt, t_img = st.tabs(["✍️ Texte", "📷 Photo"])
-        with t_txt:
-            txt = st.text_area("Votre texte", max_chars=200, key=f"st_t_{k}")
-            bg = st.pills("Couleur", list(range(len(H.BGS))), format_func=lambda i: H.BG_DOTS[i], default=0, key=f"st_bg_{k}")
-            if st.button("Publier", key=f"st_pub_{k}", type="primary") and txt.strip():
-                db.add_story(me, "text", txt.strip(), bg or 0)
-                st.session_state.ks = k + 1
-                st.rerun()
-        with t_img:
-            img = st.file_uploader("Photo", type=["png", "jpg", "jpeg", "webp"], key=f"st_i_{k}")
-            cap = st.text_input("Légende (facultatif)", max_chars=100, key=f"st_c_{k}")
-            if img and st.button("Publier la photo", key=f"st_pubi_{k}", type="primary"):
-                try:
-                    mid = db.save_media(H.shrink(img.getvalue(), 1080), "image/jpeg", img.name)
-                    db.add_story(me, "image", cap, 0, mid)
-                    st.session_state.ks = k + 1
-                    st.rerun()
-                except Exception:
-                    st.error("Image illisible.")
-
-    stories = db.visible_stories(me)
-    if not stories:
-        st.info("Aucune story pour le moment. Les stories durent 24 h et sont visibles par vos contacts.")
-        return
-    umap = db.users_map({s["username"] for s in stories})
-    last = {}
-    for s in stories:
-        last[s["username"]] = s["ts"]
-    order = sorted(last, key=lambda u: (u != me, -last[u]))
-    who = st.pills("Contacts", order, default=order[0], key="story_user", label_visibility="collapsed",
-                   format_func=lambda u: "Ma story" if u == me else umap[u]["name"])
-    who = who or order[0]
-    tz = browser_tz()
-    html(f'<div class="mc-me">{avatar(umap[who], 40, True)}<div><b>{H.esc(umap[who]["name"])}</b></div></div>')
-    for s in [s for s in stories if s["username"] == who]:
-        when = f'<div class="mc-time">{H.fmt_day(s["ts"], tz)} à {H.fmt_time(s["ts"], tz)}</div>'
-        if s["kind"] == "image":
-            cap = f'<p>{H.esc(s["body"])}</p>' if s["body"] else ""
-            html(f'<div class="mc-story-img"><img src="{media_uri(s["media_id"])}"/>{cap}</div>{when}')
-        else:
-            html(f'<div class="mc-story" style="background:{H.BGS[s["bg"] % len(H.BGS)]}">{H.esc(s["body"])}</div>{when}')
-
-
-def profile_view(me):
-    u = db.get_user(me)
-    k = st.session_state.setdefault("kp", 0)
-    st.markdown("### Mon profil")
-    html(f'<div style="text-align:center">{avatar(u, 96)}</div>')
-    photo = st.file_uploader("Photo de profil", type=["png", "jpg", "jpeg", "webp"], key=f"av_{k}")
-    name = st.text_input("Nom affiché", u["name"], max_chars=40)
-    about = st.text_input("Statut", u["about"] or "", max_chars=100)
-    if st.button("Enregistrer", type="primary", **sw(st.button)):
-        avatar_id = None
-        if photo:
-            try:
-                avatar_id = db.save_media(H.shrink(photo.getvalue(), square=256), "image/jpeg", "avatar.jpg")
-            except Exception:
-                st.error("Image illisible.")
-        db.update_profile(me, name, about, avatar_id)
-        st.session_state.kp = k + 1
-        st.rerun()
-    st.divider()
-    st.markdown("**Partagez votre nom d’utilisateur** pour qu’on vous ajoute :")
-    st.code(f"@{me}", language=None)
-    with st.expander("📲 Installer l’application sur le téléphone"):
-        st.markdown("- **Android (Chrome)** : menu ⋮ → *Installer l’application* ou *Ajouter à l’écran d’accueil*.\n"
-                    "- **iPhone (Safari)** : bouton Partager → *Sur l’écran d’accueil*.\n"
-                    "- **Ordinateur (Chrome/Edge)** : icône d’installation dans la barre d’adresse.")
-    if db.backend() == "sqlite":
-        st.caption("⚠️ Mode démo (SQLite) : sur Streamlit Cloud les données sont effacées à chaque redémarrage. "
-                   "Définissez DATABASE_URL (PostgreSQL) pour les conserver.")
-    if st.button("Se déconnecter", **sw(st.button)):
-        logout()
-
-
-PWA_JS = """(function(){
-  for (const w of [window.parent, window.top]) { try {
-    const d = w.document; if (d.querySelector('link[rel="manifest"]')) continue;
-    const add = (tag, attrs) => { const e = d.createElement(tag); Object.assign(e, attrs); d.head.appendChild(e); };
-    add('link', {rel: 'manifest', href: '/app/static/manifest.webmanifest'});
-    add('link', {rel: 'apple-touch-icon', href: '/app/static/apple-touch-icon.png'});
-    add('meta', {name: 'theme-color', content: '#0a0e13'});
-    add('meta', {name: 'apple-mobile-web-app-capable', content: 'yes'});
-    add('meta', {name: 'mobile-web-app-capable', content: 'yes'});
-    add('meta', {name: 'apple-mobile-web-app-title', content: 'Mbouda City'});
-  } catch (e) {} }
-})();"""
-
-CLOSE_SIDEBAR_JS = """(function(){const p=window.parent; if(p.innerWidth>640) return;
-  const d=p.document, b=d.querySelector('[data-testid="stSidebarCollapseButton"] button')
-    ||d.querySelector('[data-testid="stSidebarHeader"] button'); if(b) b.click();})();"""
-
-
-def main():
-    me = current_user()
-    if not me:
-        auth_screen()
-        return
-    sidebar(me)
-    ev = bridge(key="mc_bridge", default=None)
-    view = st.session_state.get("view", "chats")
-    if view == "stories":
-        stories_view(me)
-    elif view == "profile":
-        profile_view(me)
-    elif st.session_state.get("chat"):
-        chat_view(me, st.session_state.chat, ev)
-    else:
-        html('<div class="mc-hero"><div class="mc-logo">M</div><h1>Mbouda City</h1>'
-             '<p>Choisissez une discussion dans le menu ☰, ou touchez « ＋ Discussion ».</p></div>')
-    toast = st.session_state.pop("toast", None)
-    if toast:
-        st.toast(toast)
-    if st.session_state.pop("close_sb", False):
-        run_js(CLOSE_SIDEBAR_JS)
-    if not st.session_state.get("pwa"):
-        st.session_state.pwa = True
-        run_js(PWA_JS)
-
-
-main()
+/* Mbouda City : thème premium sombre */
+html, body, [data-testid="stAppViewContainer"] {
+  background: radial-gradient(circle at 85% -5%, rgba(25,195,125,.13), transparent 38%),
+              radial-gradient(circle at 5% 105%, rgba(245,197,66,.08), transparent 40%), #0a0e13;
+}
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stSidebar"] { background: #10171f; border-right: 1px solid #1f2a36; }
+[data-testid="stDecoration"], #MainMenu, footer { display: none; }
+.block-container { padding-top: 1.4rem; padding-bottom: 10rem; max-width: 760px; }
+iframe[height="0"] { visibility: hidden; position: absolute; border: 0; }
+[data-testid="stElementContainer"]:has(> iframe[height="0"]) { height: 0; margin: 0; }
+
+/* boutons */
+.stButton > button, .stDownloadButton > button, [data-testid="stBaseLinkButton-secondary"],
+[data-testid="stPopover"] button { border-radius: 14px; border: 1px solid #1f2a36; transition: .15s; }
+.stButton > button:hover { border-color: #19c37d; }
+.stButton > button[kind="primary"], button[data-testid="stBaseButton-primary"],
+button[data-testid="stBaseButton-primaryFormSubmit"] {
+  background: linear-gradient(135deg, #19c37d, #f5c542); color: #04130c; border: 0; font-weight: 700;
+  box-shadow: 0 6px 20px rgba(25,195,125,.25);
+}
+[data-testid="stChatInput"] { border-radius: 24px; }
+[data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea { border-radius: 14px; }
+
+/* marque, logo, avatars */
+.mc-brand { font-size: 22px; font-weight: 800; letter-spacing: -.5px;
+  background: linear-gradient(90deg, #19c37d, #f5c542); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.mc-logo { width: 68px; height: 68px; border-radius: 22px; display: grid; place-items: center; font-size: 34px; font-weight: 800;
+  color: #04130c; background: linear-gradient(135deg, #19c37d, #f5c542); box-shadow: 0 10px 30px rgba(25,195,125,.35); margin: 0 auto 8px; }
+.mc-hero { text-align: center; margin: 2rem 0 1rem; }
+.mc-hero h1 { font-size: 30px; margin: 0; }
+.mc-hero p { color: #8a98a8; margin: 4px 0 0; }
+.mc-av { display: inline-grid; place-items: center; border-radius: 50%; flex: none; font-weight: 700; color: #04130c;
+  background-size: cover; background-position: center; }
+.mc-av.ring { box-shadow: 0 0 0 2px #10171f, 0 0 0 4px #19c37d; }
+.mc-me { display: flex; align-items: center; gap: 12px; padding: 6px 0 10px; }
+.mc-me small, .mc-head small { color: #8a98a8; }
+.mc-head { display: flex; align-items: center; gap: 12px; padding: 4px 0 12px; border-bottom: 1px solid #1f2a36; margin-bottom: 10px; }
+.mc-head b { font-size: 17px; }
+.mc-on { color: #19c37d !important; }
+
+/* messages */
+.mc-day { text-align: center; margin: 12px 0 6px; }
+.mc-day span { background: #17202a; color: #8a98a8; font-size: 12px; padding: 3px 12px; border-radius: 12px; }
+.mc-row { display: flex; margin: 3px 0; }
+.mc-row.me { justify-content: flex-end; }
+.mc-bub { max-width: 82%; padding: 8px 12px 5px; border-radius: 18px 18px 18px 6px; background: #1a2430; border: 1px solid #1f2a36;
+  color: #e8eef5; word-break: break-word; }
+.mc-row.me .mc-bub { background: linear-gradient(135deg, #118a58, #19c37d); border: 0; border-radius: 18px 18px 6px 18px; color: #fff; }
+.mc-bub.stk, .mc-row.me .mc-bub.stk { background: none; border: 0; padding: 2px; }
+.mc-text { white-space: pre-wrap; }
+.mc-who { font-weight: 700; font-size: 12.5px; }
+.mc-img { max-width: 100%; max-height: 340px; border-radius: 12px; display: block; margin-bottom: 4px; }
+.mc-meta { text-align: right; font-size: 11px; opacity: .7; margin-top: 2px; }
+.mc-tick { letter-spacing: -2px; margin-left: 2px; }
+.mc-tick.rd { color: #7dd3fc; opacity: 1; }
+.mc-rx { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.mc-rx span { background: rgba(0,0,0,.28); border-radius: 12px; padding: 1px 8px; font-size: 13px; }
+.mc-rx span.mine { outline: 1px solid #7dd3fc; }
+.mc-stk-e { font-size: 76px; line-height: 1.1; }
+.mc-stk-t { padding: 16px 22px; border-radius: 22px; font-size: 20px; font-weight: 800; color: #fff; transform: rotate(-3deg);
+  box-shadow: 0 6px 18px rgba(0,0,0,.45); text-align: center; }
+
+/* stories */
+.mc-story { border-radius: 20px; min-height: 220px; padding: 22px; display: grid; place-items: center; text-align: center;
+  font-size: 24px; font-weight: 800; color: #fff; margin: 8px 0; text-shadow: 0 2px 8px rgba(0,0,0,.35); }
+.mc-story-img { margin: 8px 0; }
+.mc-story-img img { width: 100%; border-radius: 20px; display: block; }
+.mc-story-img p { margin: 6px 4px 0; }
+.mc-time { color: #8a98a8; font-size: 12.5px; }
+
+/* ---- v3 : réponses, transferts, menu, visionneuse, barre fixe ---- */
+.mc-row { position: relative; touch-action: pan-y; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.mc-row .mc-text { -webkit-user-select: text; user-select: text; }
+.mc-bub { transition: transform .18s ease; }
+.mc-more { cursor: pointer; opacity: .55; padding: 0 2px; font-weight: 700; }
+.mc-more:hover { opacity: 1; }
+.mc-swipe-ic { position: absolute; left: 6px; top: 50%; transform: translateY(-50%); font-size: 22px; color: #19c37d; pointer-events: none; }
+.mc-quote { background: rgba(0,0,0,.25); border-left: 3px solid #f5c542; border-radius: 8px; padding: 4px 8px; margin-bottom: 5px;
+  font-size: 13px; cursor: pointer; overflow: hidden; }
+.mc-quote b { color: #f5c542; font-size: 12.5px; }
+.mc-quote div { opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc-fwd { font-size: 12px; opacity: .75; font-style: italic; margin-bottom: 2px; }
+.mc-row.flash .mc-bub { animation: mc-flash 1.3s ease; }
+@keyframes mc-flash { 0%, 100% { box-shadow: none; } 30% { box-shadow: 0 0 0 3px #f5c542; } }
+.mc-img { cursor: zoom-in; }
+[data-testid="stVideo"], video[data-testid="stVideo"] { border-radius: 14px; max-height: 340px; cursor: zoom-in; }
+
+.mc-menu { position: fixed; z-index: 100000; background: #10171f; border: 1px solid #1f2a36; border-radius: 16px; padding: 6px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.6); display: flex; flex-direction: column; min-width: 190px; }
+.mc-menu-rx { display: flex; justify-content: space-between; padding: 2px 4px 6px; border-bottom: 1px solid #1f2a36; margin-bottom: 4px; }
+.mc-menu-rx button { background: none; border: 0; font-size: 24px; cursor: pointer; border-radius: 50%; width: 38px; height: 38px; }
+.mc-menu-rx button:hover { background: #17202a; transform: scale(1.2); }
+.mc-menu-it { background: none; border: 0; color: #e8eef5; text-align: left; font-size: 15px; padding: 10px 12px; border-radius: 10px; cursor: pointer; }
+.mc-menu-it:hover { background: #17202a; }
+
+.mc-lb { position: fixed; inset: 0; z-index: 100001; background: rgba(0,0,0,.92); display: flex; align-items: center; justify-content: center; }
+.mc-lb img, .mc-lb video { max-width: 96vw; max-height: 92vh; border-radius: 10px; }
+.mc-lb-x, .mc-lb-dl { position: absolute; top: 14px; background: rgba(255,255,255,.14); color: #fff; border: 0; border-radius: 50%;
+  width: 44px; height: 44px; font-size: 20px; cursor: pointer; display: grid; place-items: center; text-decoration: none; }
+.mc-lb-x { right: 14px; }
+.mc-lb-dl { right: 68px; }
+
+/* barre d'outils fixe, juste au-dessus de la barre d'envoi (la position exacte est ajustée par le composant JS) */
+.st-key-mc-tools { position: fixed; z-index: 90; left: 50%; transform: translateX(-50%); width: min(740px, 96vw); bottom: 4.8rem;
+  display: flex; flex-direction: row; align-items: flex-end; justify-content: flex-end; gap: .5rem; pointer-events: none; }
+.st-key-mc-tools > * { pointer-events: auto; width: auto !important; flex: 0 0 auto; }
+.st-key-mc-tools > *:has(.mc-replybar) { flex: 1 1 auto; min-width: 0; }
+.mc-replybar { background: #17202a; border: 1px solid #1f2a36; border-left: 3px solid #19c37d; border-radius: 12px; padding: 6px 10px;
+  font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.4); overflow: hidden; }
+.mc-replybar b { color: #19c37d; }
+.mc-replybar div { opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-key-mc-tools [data-testid="stPopover"] button, .st-key-mc-tools .stButton > button {
+  background: #10171f; box-shadow: 0 6px 20px rgba(0,0,0,.45); }
