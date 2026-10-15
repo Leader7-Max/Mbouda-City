@@ -6,8 +6,9 @@ html, body, [data-testid="stAppViewContainer"] {
 [data-testid="stHeader"] { background: transparent; }
 [data-testid="stSidebar"] { background: #10171f; border-right: 1px solid #1f2a36; }
 [data-testid="stDecoration"], #MainMenu, footer { display: none; }
-.block-container { padding-top: 1.4rem; padding-bottom: 7rem; max-width: 760px; }
-iframe[height="0"] { display: none; }
+.block-container { padding-top: 1.4rem; padding-bottom: 10rem; max-width: 760px; }
+iframe[height="0"] { visibility: hidden; position: absolute; border: 0; }
+[data-testid="stElementContainer"]:has(> iframe[height="0"]) { height: 0; margin: 0; }
 
 /* boutons */
 .stButton > button, .stDownloadButton > button, [data-testid="stBaseLinkButton-secondary"],
@@ -67,3 +68,47 @@ button[data-testid="stBaseButton-primaryFormSubmit"] {
 .mc-story-img img { width: 100%; border-radius: 20px; display: block; }
 .mc-story-img p { margin: 6px 4px 0; }
 .mc-time { color: #8a98a8; font-size: 12.5px; }
+
+/* ---- v3 : réponses, transferts, menu, visionneuse, barre fixe ---- */
+.mc-row { position: relative; touch-action: pan-y; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.mc-row .mc-text { -webkit-user-select: text; user-select: text; }
+.mc-bub { transition: transform .18s ease; }
+.mc-more { cursor: pointer; opacity: .55; padding: 0 2px; font-weight: 700; }
+.mc-more:hover { opacity: 1; }
+.mc-swipe-ic { position: absolute; left: 6px; top: 50%; transform: translateY(-50%); font-size: 22px; color: #19c37d; pointer-events: none; }
+.mc-quote { background: rgba(0,0,0,.25); border-left: 3px solid #f5c542; border-radius: 8px; padding: 4px 8px; margin-bottom: 5px;
+  font-size: 13px; cursor: pointer; overflow: hidden; }
+.mc-quote b { color: #f5c542; font-size: 12.5px; }
+.mc-quote div { opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc-fwd { font-size: 12px; opacity: .75; font-style: italic; margin-bottom: 2px; }
+.mc-row.flash .mc-bub { animation: mc-flash 1.3s ease; }
+@keyframes mc-flash { 0%, 100% { box-shadow: none; } 30% { box-shadow: 0 0 0 3px #f5c542; } }
+.mc-img { cursor: zoom-in; }
+[data-testid="stVideo"], video[data-testid="stVideo"] { border-radius: 14px; max-height: 340px; cursor: zoom-in; }
+
+.mc-menu { position: fixed; z-index: 100000; background: #10171f; border: 1px solid #1f2a36; border-radius: 16px; padding: 6px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.6); display: flex; flex-direction: column; min-width: 190px; }
+.mc-menu-rx { display: flex; justify-content: space-between; padding: 2px 4px 6px; border-bottom: 1px solid #1f2a36; margin-bottom: 4px; }
+.mc-menu-rx button { background: none; border: 0; font-size: 24px; cursor: pointer; border-radius: 50%; width: 38px; height: 38px; }
+.mc-menu-rx button:hover { background: #17202a; transform: scale(1.2); }
+.mc-menu-it { background: none; border: 0; color: #e8eef5; text-align: left; font-size: 15px; padding: 10px 12px; border-radius: 10px; cursor: pointer; }
+.mc-menu-it:hover { background: #17202a; }
+
+.mc-lb { position: fixed; inset: 0; z-index: 100001; background: rgba(0,0,0,.92); display: flex; align-items: center; justify-content: center; }
+.mc-lb img, .mc-lb video { max-width: 96vw; max-height: 92vh; border-radius: 10px; }
+.mc-lb-x, .mc-lb-dl { position: absolute; top: 14px; background: rgba(255,255,255,.14); color: #fff; border: 0; border-radius: 50%;
+  width: 44px; height: 44px; font-size: 20px; cursor: pointer; display: grid; place-items: center; text-decoration: none; }
+.mc-lb-x { right: 14px; }
+.mc-lb-dl { right: 68px; }
+
+/* barre d'outils fixe, juste au-dessus de la barre d'envoi (la position exacte est ajustée par le composant JS) */
+.st-key-mc-tools { position: fixed; z-index: 90; left: 50%; transform: translateX(-50%); width: min(740px, 96vw); bottom: 4.8rem;
+  display: flex; flex-direction: row; align-items: flex-end; justify-content: flex-end; gap: .5rem; pointer-events: none; }
+.st-key-mc-tools > * { pointer-events: auto; width: auto !important; flex: 0 0 auto; }
+.st-key-mc-tools > *:has(.mc-replybar) { flex: 1 1 auto; min-width: 0; }
+.mc-replybar { background: #17202a; border: 1px solid #1f2a36; border-left: 3px solid #19c37d; border-radius: 12px; padding: 6px 10px;
+  font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.4); overflow: hidden; }
+.mc-replybar b { color: #19c37d; }
+.mc-replybar div { opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-key-mc-tools [data-testid="stPopover"] button, .st-key-mc-tools .stButton > button {
+  background: #10171f; box-shadow: 0 6px 20px rgba(0,0,0,.45); }
