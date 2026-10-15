@@ -7,7 +7,12 @@ Messagerie type WhatsApp, **sans numéro de téléphone** : on crée un compte e
 
 - Comptes (nom d'utilisateur + mot de passe), photo de profil, statut
 - Discussions privées et groupes, avec nom des membres
-- Envoi de photos et de fichiers (8 Mo max, les photos sont compressées)
+- Barre d'envoi toujours fixée en bas de l'écran : texte, trombone (photos, vidéos, documents) et micro (vocaux)
+- Photos (compressées), vidéos (16 Mo max) et documents (8 Mo max)
+- **Glisser un message vers la droite pour répondre** (la réponse cite le message d'origine)
+- **Appui long** (ou clic droit, ou bouton ⋯) : répondre, transférer, copier, réagir
+- **Transférer** un message vers une ou plusieurs discussions
+- **Toucher une photo ou une vidéo pour l'ouvrir en grand**
 - Messages vocaux, stickers (emojis géants et mots colorés), réactions (👍 ❤️ 😂 😮 😢 🙏)
 - Accusés de lecture : ✓ envoyé, ✓✓ bleu lu (dans un groupe : lu par tous)
 - Stories de 24 h (texte coloré ou photo), visibles par vos contacts
@@ -45,10 +50,23 @@ Les données sont alors dans `data/mbouda.db` (SQLite). Rien d'autre à configur
 | `db.py` | Stockage SQLite / PostgreSQL (comptes, messages, médias, stories) |
 | `helpers.py` | Fonctions pures : formats, HTML des bulles, compression d'images |
 | `assets/style.css` | Thème |
+| `frontend/index.html` | Composant invisible : gestes, menu, visionneuse, barre fixe (JavaScript pur, sans compilation) |
 | `static/` | Icônes et manifeste (installation sur l'écran d'accueil) |
 | `.streamlit/config.toml` | Thème et options du serveur |
 
+## Versions de Streamlit
+
+Le trombone et le micro dans la barre d'envoi demandent une version récente de Streamlit
+(`accept_file` depuis la 1.43, `accept_audio` plus récent). Sur une version plus ancienne, l'application
+détecte automatiquement ce qui manque et place ces deux fonctions dans le bouton ＋ à la place.
+`requirements.txt` demande `streamlit>=1.47`.
+
 ## Limites à connaître
+
+- **Gestes** : le glissement, le menu et la visionneuse sont du JavaScript qui s'installe dans la page Streamlit.
+  Ils ont été testés dans Chromium sur une page imitant Streamlit, pas sur un Streamlit réel : si une future
+  version de Streamlit change ses balises internes (`data-testid`), il faudra ajuster `frontend/index.html`.
+- **Vidéos** : le lecteur est celui du navigateur. Les `.mov` d'iPhone ne se lisent pas partout ; préférer le MP4.
 
 - **Temps réel par rafraîchissement** : Streamlit n'a pas de WebSocket applicatif. La discussion ouverte se
   met à jour toutes les 3 secondes, la liste des discussions toutes les 4 secondes. Convient à quelques dizaines
