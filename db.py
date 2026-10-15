@@ -149,7 +149,8 @@ def _init():
             f"CREATE TABLE IF NOT EXISTS members (chat_id INTEGER NOT NULL, username TEXT NOT NULL, last_read {real} DEFAULT 0, PRIMARY KEY (chat_id, username))",
             f"""CREATE TABLE IF NOT EXISTS messages (
                 id {pk}, chat_id INTEGER NOT NULL, sender TEXT NOT NULL, kind TEXT NOT NULL,
-                body TEXT DEFAULT '', media_id INTEGER, meta TEXT DEFAULT '', ts {real} NOT NULL)""",
+                body TEXT DEFAULT '', media_id INTEGER, meta TEXT DEFAULT '', ts {real} NOT NULL,
+                reply_to INTEGER, forwarded INTEGER DEFAULT 0)""",
             "CREATE TABLE IF NOT EXISTS reactions (message_id INTEGER NOT NULL, username TEXT NOT NULL, emoji TEXT NOT NULL, PRIMARY KEY (message_id, username))",
             f"CREATE TABLE IF NOT EXISTS stories (id {pk}, username TEXT NOT NULL, kind TEXT NOT NULL, body TEXT DEFAULT '', bg INTEGER DEFAULT 0, media_id INTEGER, ts {real} NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_msg_chat ON messages (chat_id, id)",
@@ -162,6 +163,13 @@ def _init():
                 cur.execute("PRAGMA journal_mode=WAL")
             for s in ddl:
                 cur.execute(s)
+        # Bases créées avant les réponses/transferts : on ajoute les colonnes (échec ignoré si déjà là).
+        for col in ("reply_to INTEGER", "forwarded INTEGER DEFAULT 0"):
+            try:
+                with _cx() as c:
+                    c.cursor().execute(f"ALTER TABLE messages ADD COLUMN {col}")
+            except Exception:
+                pass
         _ready = True
 
 
@@ -367,14 +375,41 @@ def mark_read(chat_id, username):
 
 
 # ---------------------------------------------------------------- messages
-KINDS = {"text", "image", "file", "voice", "sticker", "call"}
+KINDS = {"text", "image", "video", "file", "voice", "sticker", "call"}
 
 
-def send(chat_id, sender, kind, body="", media_id=None, meta=""):
+def send(chat_id, sender, kind, body="", media_id=None, meta="", reply_to=None, forwarded=False):
     if kind not in KINDS or not is_member(chat_id, sender):
         return None
-    return _exec("INSERT INTO messages (chat_id,sender,kind,body,media_id,meta,ts) VALUES (?,?,?,?,?,?,?)",
-                 (chat_id, sender, kind, (body or "")[:4000], media_id, (meta or "")[:200], time.time()), new_id=True)
+    if reply_to and not _one("SELECT 1 AS x FROM messages WHERE id=? AND chat_id=?", (reply_to, chat_id)):
+        reply_to = None  # on ne peut répondre qu'à un message de la même discussion
+    return _exec("INSERT INTO messages (chat_id,sender,kind,body,media_id,meta,ts,reply_to,forwarded) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (chat_id, sender, kind, (body or "")[:4000], media_id, (meta or "")[:200], time.time(),
+                  reply_to or None, 1 if forwarded else 0), new_id=True)
+
+
+def get_message(message_id):
+    return _one("SELECT * FROM messages WHERE id=?", (message_id,))
+
+
+def messages_by_ids(ids, chat_id):
+    ids = [i for i in set(ids) if i]
+    if not ids:
+        return {}
+    return {r["id"]: r for r in _all(
+        f"SELECT * FROM messages WHERE chat_id=? AND id IN ({_marks(ids)})", [chat_id, *ids])}
+
+
+def forward(message_id, me, chat_ids):
+    """Copie un message vers d'autres discussions où je suis membre. Retourne le nombre d'envois."""
+    m = get_message(message_id)
+    if not m or m["kind"] == "call" or not is_member(m["chat_id"], me):
+        return 0
+    n = 0
+    for cid in set(chat_ids):
+        if is_member(cid, me) and send(cid, me, m["kind"], m["body"], m["media_id"], m["meta"], forwarded=True):
+            n += 1
+    return n
 
 
 def chat_messages(chat_id, limit=50):
