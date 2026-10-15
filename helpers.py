@@ -23,6 +23,7 @@ STICKER_EMOJIS = ["😀", "😂", "🥰", "😎", "🤩", "😭", "😡", "🤯"
 STICKER_WORDS = ["Merci !", "Salut 👋", "OK ✅", "Bravo 👏", "Bonne nuit 🌙", "Ça va ?",
                  "À bientôt", "Félicitations 🎉", "Je t’aime ❤️", "Pas de souci", "Bon appétit 🍽️", "Courage 💪"]
 MAX_FILE = 8 * 1024 * 1024
+MAX_VIDEO = 16 * 1024 * 1024
 MAX_VOICE = 4 * 1024 * 1024
 
 
@@ -93,9 +94,19 @@ def avatar_html(user, size=40, uri="", ring=False):
 
 def preview_text(m, me):
     k = m["kind"]
-    p = {"text": m["body"], "image": "📷 Photo", "file": "📎 " + (m["meta"] or "Fichier"), "voice": "🎤 Vocal",
-         "sticker": "Sticker", "call": "📞 Appel"}.get(k, "")
+    p = {"text": m["body"], "image": "📷 Photo", "video": "🎥 Vidéo", "file": "📎 " + (m["meta"] or "Fichier"),
+         "voice": "🎤 Vocal", "sticker": "Sticker", "call": "📞 Appel"}.get(k, "")
     return ("Vous : " if m["sender"] == me else "") + p
+
+
+def quote_info(orig, name_of):
+    """Résumé d'un message cité (réponse) : {id, name, text}."""
+    return {"id": orig["id"], "name": name_of(orig["sender"]), "text": preview_text(orig, "")[:90]}
+
+
+def quote_html(q):
+    return (f'<div class="mc-quote" data-goto="{q["id"]}"><b>{esc(q["name"])}</b>'
+            f'<div>{esc(q["text"])}</div></div>')
 
 
 def reaction_chips(reacts, me):
@@ -119,13 +130,19 @@ def sticker_html(body):
     return f'<div class="mc-stk-t" style="background:{bg}">{esc(word)}</div>'
 
 
-def bubble(m, me, group, name_of, reads, others, reacts, uri_of, tz=timezone.utc):
-    """Retourne (html, widget). widget = None ou un dict pour les messages qui demandent un composant natif."""
+def bubble(m, me, group, name_of, reads, others, reacts, uri_of, tz=timezone.utc, quotes=None):
+    """Retourne (html, widget). widget = None ou un dict pour les messages qui demandent un composant natif.
+    quotes : {id du message cité: quote_info(...)} pour afficher les réponses."""
     mine = m["sender"] == me
     kind = m["kind"]
     who = ""
     if group and not mine:
         who = f'<div class="mc-who" style="color:{color_for(m["sender"])}">{esc(name_of(m["sender"]))}</div>'
+    if m.get("forwarded"):
+        who += '<div class="mc-fwd">↪ Transféré</div>'
+    q = (quotes or {}).get(m.get("reply_to"))
+    if q:
+        who += quote_html(q)
     meta = fmt_time(m["ts"], tz)
     if mine:
         read = bool(others) and all(reads.get(u, 0) >= m["ts"] for u in others)
@@ -147,6 +164,9 @@ def bubble(m, me, group, name_of, reads, others, reacts, uri_of, tz=timezone.utc
             dur = 0
         inner = f'<div class="mc-text">🎤 Message vocal · {fmt_dur(dur)}</div>'
         widget = {"type": "voice", "media_id": m["media_id"]}
+    elif kind == "video":
+        inner = f'<div class="mc-text">🎥 <b>{esc(m["meta"] or "Vidéo")}</b></div>'
+        widget = {"type": "video", "media_id": m["media_id"], "id": m["id"]}
     elif kind == "file":
         inner = f'<div class="mc-text">📄 <b>{esc(m["meta"] or "Fichier")}</b></div>'
         widget = {"type": "file", "media_id": m["media_id"], "name": m["meta"] or "fichier", "id": m["id"]}
@@ -157,6 +177,7 @@ def bubble(m, me, group, name_of, reads, others, reacts, uri_of, tz=timezone.utc
     else:
         inner = f'<div class="mc-text">{esc(m["body"])}</div>'
     side = "me" if mine else "them"
-    out = (f'<div class="mc-row {side}"><div class="mc-bub{cls}">{who}{inner}'
-           f'<div class="mc-meta">{meta}</div>{reaction_chips(reacts, me)}</div></div>')
+    more = '' if kind == "call" else ' <span class="mc-more" title="Répondre, transférer, réagir">⋯</span>'
+    out = (f'<div class="mc-row {side}" data-mid="{m["id"]}"><div class="mc-bub{cls}">{who}{inner}'
+           f'<div class="mc-meta">{meta}{more}</div>{reaction_chips(reacts, me)}</div></div>')
     return out, widget
