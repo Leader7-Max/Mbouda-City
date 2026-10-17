@@ -1,1 +1,206 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>mc_bridge</title></head>
+<body>
+<script>
+/* Mbouda City : pont Streamlit <-> page.
+ * Composant « invisible » : il installe, dans la page Streamlit (même origine), les gestes
+ *   - glisser un message vers la droite = répondre
+ *   - appui long / clic droit / bouton ⋯ = menu (répondre, transférer, copier, réagir)
+ *   - clic sur une photo ou une vidéo = ouverture en grand
+ *   - clic sur une citation = retour au message d'origine
+ *   - barre d'outils alignée sur la barre d'envoi
+ * Les actions sont renvoyées à Python avec Streamlit.setComponentValue (protocole officiel v1).
+ */
+(function () {
+  var HOST = window.parent;
+  function send(type, data) {
+    HOST.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data || {}), "*");
+  }
+  function emit(ev) {
+    send("streamlit:setComponentValue",
+         { value: Object.assign({ n: Date.now() + Math.random() }, ev), dataType: "json" });
+  }
 
+  var D = null;
+  try { D = HOST.document; } catch (e) { D = null; }
+  if (D) {
+    var G0 = HOST.__mcGest || (HOST.__mcGest = {});
+    G0.emit = emit;                       // l'iframe courante ; remplacée si Streamlit recrée le composant
+    if (!G0.installed) {
+      G0.installed = true;
+      try {                               // le code tourne dans la page elle-même : il survit à la destruction de l'iframe
+        var sc = D.createElement("script");
+        sc.textContent = "(" + hostCode.toString() + ")(window);";
+        D.head.appendChild(sc);
+        sc.remove();
+      } catch (e) { hostCode(HOST); }     // secours si l'injection est refusée
+    }
+  }
+  send("streamlit:componentReady", { apiVersion: 1 });
+  send("streamlit:setFrameHeight", { height: 0 });
+
+  /* Tout ce qui suit s'exécute dans la page Streamlit (HOST), pas dans l'iframe. Aucune variable extérieure. */
+  function hostCode(HOST) {
+    var D = HOST.document, G = HOST.__mcGest;
+    var REACTS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+    var $ = function (sel) { return D.querySelector(sel); };
+    var closest = function (t, sel) { return t && t.closest ? t.closest(sel) : null; };
+    function el(tag, cls, html) {
+      var x = D.createElement(tag);
+      if (cls) x.className = cls;
+      if (html != null) x.innerHTML = html;
+      return x;
+    }
+
+    /* ---------- menu d'actions ---------- */
+    function closeMenu() { var m = $(".mc-menu"); if (m) m.remove(); }
+    function openMenu(row, x, y) {
+      closeMenu();
+      var mid = row.getAttribute("data-mid");
+      var m = el("div", "mc-menu");
+      var rx = el("div", "mc-menu-rx");
+      REACTS.forEach(function (r, i) {
+        var b = el("button", null, r);
+        b.onclick = function () { closeMenu(); G.emit({ type: "react", id: mid, idx: i }); };
+        rx.appendChild(b);
+      });
+      m.appendChild(rx);
+      function add(label, fn) {
+        var b = el("button", "mc-menu-it", label);
+        b.onclick = function () { closeMenu(); fn(); };
+        m.appendChild(b);
+      }
+      add("↩ Répondre", function () { G.emit({ type: "reply", id: mid }); });
+      add("↪ Transférer", function () { G.emit({ type: "forward", id: mid }); });
+      var t = row.querySelector(".mc-text");
+      if (t) add("📋 Copier", function () {
+        try { HOST.navigator.clipboard.writeText(t.innerText); } catch (e) {}
+      });
+      D.body.appendChild(m);
+      var w = m.offsetWidth, h = m.offsetHeight, W = HOST.innerWidth, H = HOST.innerHeight;
+      var top = y - h - 8;
+      if (top < 8) top = Math.min(y + 12, H - h - 8);
+      m.style.left = Math.max(8, Math.min(x - w / 2, W - w - 8)) + "px";
+      m.style.top = Math.max(8, top) + "px";
+    }
+    D.addEventListener("pointerdown", function (e) { if (!closest(e.target, ".mc-menu")) closeMenu(); }, true);
+    D.addEventListener("contextmenu", function (e) {
+      var row = closest(e.target, ".mc-row[data-mid]");
+      if (row) { e.preventDefault(); openMenu(row, e.clientX, e.clientY); }
+    });
+
+    /* ---------- glisser pour répondre + appui long ---------- */
+    var row = null, bub = null, sx = 0, sy = 0, dx = 0, active = false, moved = false, lp = null, ic = null;
+    function resetSwipe() {
+      clearTimeout(lp);
+      if (bub) { bub.style.transition = "transform .18s ease"; bub.style.transform = ""; }
+      if (ic) { ic.remove(); ic = null; }
+      active = false; row = null; bub = null; dx = 0;
+    }
+    D.addEventListener("touchstart", function (e) {
+      var r = closest(e.target, ".mc-row[data-mid]");
+      if (!r || e.touches.length !== 1 || closest(e.target, ".mc-more")) return;
+      row = r; bub = r.querySelector(".mc-bub");
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; moved = false; active = true;
+      clearTimeout(lp);
+      lp = setTimeout(function () {
+        if (active && !moved) { var rr = row; active = false; openMenu(rr, sx, sy); if (navigator.vibrate) navigator.vibrate(20); }
+      }, 480);
+    }, { passive: true });
+    D.addEventListener("touchmove", function (e) {
+      if (!active) return;
+      var t = e.touches[0], mx = t.clientX - sx, my = t.clientY - sy;
+      if (!moved && Math.abs(my) > 10 && Math.abs(my) > Math.abs(mx)) { resetSwipe(); return; }  // défilement vertical
+      if (Math.abs(mx) > 8) { moved = true; clearTimeout(lp); }
+      dx = Math.max(0, Math.min(mx, 90));
+      if (bub && moved) {
+        bub.style.transition = "none";
+        bub.style.transform = "translateX(" + dx + "px)";
+        if (!ic) { ic = el("span", "mc-swipe-ic", "↩"); row.appendChild(ic); }
+        ic.style.opacity = Math.min(1, dx / 60);
+      }
+    }, { passive: true });
+    D.addEventListener("touchend", function () {
+      if (!active) { resetSwipe(); return; }
+      var fire = dx >= 60, id = row && row.getAttribute("data-mid");
+      resetSwipe();
+      if (fire && id) { if (navigator.vibrate) navigator.vibrate(15); G.emit({ type: "reply", id: id }); }
+    }, { passive: true });
+    D.addEventListener("touchcancel", resetSwipe, { passive: true });
+
+    /* ---------- visionneuse photo / vidéo ---------- */
+    function closeLb() {
+      var lb = $(".mc-lb");
+      if (lb) { var v = lb.querySelector("video"); if (v) v.pause(); lb.remove(); }
+    }
+    function lightbox(kind, src, t) {
+      closeLb();
+      var lb = el("div", "mc-lb"), media;
+      if (kind === "img") { media = el("img"); media.src = src; }
+      else {
+        media = el("video"); media.controls = true; media.autoplay = true; media.playsInline = true; media.src = src;
+        if (t) media.addEventListener("loadedmetadata", function () { try { media.currentTime = t; } catch (e) {} });
+      }
+      var x = el("button", "mc-lb-x", "✕");
+      lb.appendChild(media); lb.appendChild(x);
+      if (kind === "img") { var a = el("a", "mc-lb-dl", "⬇"); a.href = src; a.download = "photo.jpg"; lb.appendChild(a); }
+      lb.addEventListener("click", function (e) { if (e.target === lb || e.target === x) closeLb(); });
+      D.body.appendChild(lb);
+    }
+    D.addEventListener("keydown", function (e) { if (e.key === "Escape") { closeLb(); closeMenu(); } });
+
+    function gotoMsg(id) {
+      var t = $('.mc-row[data-mid="' + id + '"]');
+      if (!t) return;
+      t.scrollIntoView({ block: "center", behavior: "smooth" });
+      t.classList.add("flash");
+      setTimeout(function () { t.classList.remove("flash"); }, 1400);
+    }
+
+    D.addEventListener("click", function (e) {
+      if (closest(e.target, ".mc-lb") || closest(e.target, ".mc-menu")) return;
+      var v = closest(e.target, 'video[data-testid="stVideo"], [data-testid="stVideo"] video');
+      if (v) {                                           // clic sur l'image de la vidéo = ouvrir (barre de contrôle = lecture)
+        var r = v.getBoundingClientRect();
+        if (e.clientY < r.bottom - 48) {
+          e.preventDefault(); e.stopPropagation();
+          v.pause();
+          lightbox("video", v.currentSrc || v.src, v.currentTime);
+        }
+        return;
+      }
+      var img = closest(e.target, ".mc-img, .mc-story-img img");
+      if (img) { lightbox("img", img.src); return; }
+      var more = closest(e.target, ".mc-more");
+      if (more) {
+        var rw = closest(more, ".mc-row[data-mid]"), b = more.getBoundingClientRect();
+        if (rw) openMenu(rw, b.left + b.width / 2, b.top);
+        return;
+      }
+      var q = closest(e.target, ".mc-quote[data-goto]");
+      if (q) gotoMsg(q.getAttribute("data-goto"));
+    }, true);
+
+    /* ---------- barre d'outils alignée sur la barre d'envoi ---------- */
+    var pending = false;
+    function placeTools() {
+      pending = false;
+      var box = $(".st-key-mc-tools"), ci = $('[data-testid="stChatInput"]');
+      if (!box || !ci) return;
+      var r = ci.getBoundingClientRect();
+      if (!r.width) return;
+      box.style.transform = "none";
+      box.style.left = r.left + "px";
+      box.style.width = r.width + "px";
+      box.style.bottom = (HOST.innerHeight - r.top + 6) + "px";
+    }
+    function schedule() { if (!pending) { pending = true; HOST.requestAnimationFrame(placeTools); } }
+    HOST.addEventListener("resize", schedule);
+    new HOST.MutationObserver(schedule).observe(D.body, { childList: true, subtree: true });
+    schedule();
+  }
+})();
+</script>
+</body>
+</html>
