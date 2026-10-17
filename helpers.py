@@ -22,8 +22,8 @@ STICKER_EMOJIS = ["😀", "😂", "🥰", "😎", "🤩", "😭", "😡", "🤯"
                   "👏", "🔥", "💯", "❤️", "💪", "🎉", "👍", "🤝", "😴", "🤔"]
 STICKER_WORDS = ["Merci !", "Salut 👋", "OK ✅", "Bravo 👏", "Bonne nuit 🌙", "Ça va ?",
                  "À bientôt", "Félicitations 🎉", "Je t’aime ❤️", "Pas de souci", "Bon appétit 🍽️", "Courage 💪"]
-MAX_FILE = 8 * 1024 * 1024
-MAX_VIDEO = 16 * 1024 * 1024
+MAX_FILE = 25 * 1024 * 1024
+MAX_VIDEO = 60 * 1024 * 1024
 MAX_VOICE = 4 * 1024 * 1024
 
 
