@@ -1,9 +1,9 @@
 [server]
 enableStaticServing = true   # sert le dossier static/ (icônes et manifeste PWA)
-maxUploadSize = 10           # Mo
+maxUploadSize = 100          # Mo (vidéos)
 
 [client]
-toolbarMode = "minimal"
+toolbarMode = "viewer"
 
 [browser]
 gatherUsageStats = false
