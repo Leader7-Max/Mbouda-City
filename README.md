@@ -50,8 +50,7 @@ Les données sont alors dans `data/mbouda.db` (SQLite). Rien d'autre à configur
 | `db.py` | Stockage SQLite / PostgreSQL (comptes, messages, médias, stories) |
 | `helpers.py` | Fonctions pures : formats, HTML des bulles, compression d'images |
 | `assets/style.css` | Thème |
-| `frontend/index.html` | Composant invisible : gestes, menu, visionneuse, barre fixe (JavaScript pur, sans compilation) |
-| `static/` | Icônes et manifeste (installation sur l'écran d'accueil) |
+| `bridge_assets.py` | Génère au démarrage le composant invisible (gestes, menu, visionneuse, barre fixe) et les icônes PWA. Rien d'autre à créer |
 | `.streamlit/config.toml` | Thème et options du serveur |
 
 ## Versions de Streamlit
@@ -65,7 +64,7 @@ détecte automatiquement ce qui manque et place ces deux fonctions dans le bouto
 
 - **Gestes** : le glissement, le menu et la visionneuse sont du JavaScript qui s'installe dans la page Streamlit.
   Ils ont été testés dans Chromium sur une page imitant Streamlit, pas sur un Streamlit réel : si une future
-  version de Streamlit change ses balises internes (`data-testid`), il faudra ajuster `frontend/index.html`.
+  version de Streamlit change ses balises internes (`data-testid`), il faudra ajuster `bridge_assets.py`.
 - **Vidéos** : le lecteur est celui du navigateur. Les `.mov` d'iPhone ne se lisent pas partout ; préférer le MP4.
 
 - **Temps réel par rafraîchissement** : Streamlit n'a pas de WebSocket applicatif. La discussion ouverte se
@@ -82,3 +81,9 @@ détecte automatiquement ce qui manque et place ces deux fonctions dans le bouto
 - **Installation sur l'écran d'accueil** : le manifeste et les icônes sont injectés au chargement. Streamlit
   n'autorise pas de service worker, donc pas de mode hors ligne ; sur Streamlit Cloud, l'application est
   encapsulée dans une page par la plateforme, et l'installation peut se limiter à un raccourci.
+
+
+## Si l'application ne démarre pas
+Vérifiez la première ligne de chaque fichier : `app.py` commence par `"""` puis « Mbouda City : messagerie… »,
+`bridge_assets.py` par `"""` puis « bridge_assets.py », `db.py` par `"""` puis « db.py : stockage »,
+`assets/style.css` par `/* Mbouda City : thème premium sombre */`. Les dossiers `frontend/` et `static/` ne sont plus nécessaires.
